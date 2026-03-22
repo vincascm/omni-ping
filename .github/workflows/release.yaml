@@ -53,7 +53,7 @@ jobs:
       - name: Publish artifacts and release
         uses: houseabsolute/actions-rust-release@v0
         with:
-          executable-name: server
+          executable-name: server,client
           target: ${{ matrix.platform.target }}
-          extra-files: 'client'
+          extra-files: ''
           changes-file: ''
