@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>omni-ping Real-time Statistics</title>
+    {% if is_zoomed %}
+    <!-- Auto-refresh disabled when zoomed -->
+    {% else %}
+    <meta http-equiv="refresh" content="5">
+    {% endif %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 2em; background: #f4f4f9; color: #333; }
+        .container { max-width: 1100px; margin: 0 auto; background: white; padding: 2em; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 0.5em; margin-bottom: 0.5em; }
+        .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1em; margin-bottom: 1em; }
+        .stat-card { background: #f8f9fa; padding: 1em; border-radius: 4px; border-left: 4px solid #3498db; font-size: 0.95em; line-height: 1.4; }
+        .stat-card.geo-card { border-left-color: #f1c40f;  }
+        .stat-card.dist-card { border-left-color: #9b59b6; }
+        .chart-container { cursor: pointer; position: relative; height: 500px; margin-bottom: 1em; }
+        .as-info { font-size: 0.82em; color: #666; display: block; margin-top: 6px; line-height: 1.2; }
+        .ip-info { color: #2980b9; font-weight: bold; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <div class=container>
+        <h1>Ping Statistics for {{ target }}
+            {% if is_zoomed %}
+            <a href="/" style="font-size: 0.5em; vertical-align: middle; margin-left: 20px; text-decoration: none; background: #3498db; color: white; padding: 5px 10px; border-radius: 4px;">Reset Zoom</a>
+            {% endif %}
+        </h1>
+
+        <div class=summary>
+            {% if client_geo and client_geo.status == "success" %}
+            <div class="stat-card geo-card">
+                <strong>Local</strong><br>
+                <span class="ip-info">{{ client_geo.query }}</span><br>
+                {{ client_geo.city }}, {{ client_geo.country }}
+                <span class="as-info">{{ client_geo.as }}</span>
+            </div>
+            {% endif %}
+
+            {% if server_geo and server_geo.status == "success" %}
+            <div class="stat-card geo-card">
+                <strong>Remote</strong><br>
+                <span class="ip-info">{{ server_geo.query }}</span><br>
+                {{ server_geo.city }}, {{ server_geo.country }}
+                <span class="as-info">{{ server_geo.as }}</span>
+            </div>
+            {% endif %}
+
+            {% if distance_km is not none %}
+            <div class="stat-card dist-card">
+                <strong>Physical Limits</strong><br>
+                {{ distance_km | round(2) }} km<br>{{ fiber_limit_ms | round(3) }} ms (Fiber)
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="summary">
+            <div class="stat-card"><strong>Transmitted</strong><br>{{ total_transmitted }}</div>
+            <div class="stat-card"><strong>Avg Packet Loss</strong><br>{{ packet_loss_percent | round(2) }}%</div>
+            <div class="stat-card"><strong>Min RTT</strong><br>{{ min_latency }}</div>
+        </div>
+
+        <div class="summary">
+            <div class="stat-card"><strong>Avg RTT</strong><br>{{ avg_latency }}</div>
+            <div class="stat-card"><strong>Max RTT</strong><br>{{ max_latency }}</div>
+            <div class="stat-card"><strong>Std Dev</strong><br>{{ std_dev }}</div>
+        </div>
+
+        <div class="chart-container"><canvas id="pingChart"></canvas></div>
+    </div>
+    <script>
+        const points = {{ points | tojson }};
+        const intervalName = "{{ interval_name }}";
+        const ctx = document.getElementById("pingChart").getContext("2d");
+        new Chart(ctx, {
+            type: "line",
+            data: {
+                labels: points.map(p => p.label),
+                datasets: [
+                    {
+                        label: "Avg Latency (ms)",
+                        data: points.map(p => p.avg_latency),
+                        borderColor: "#3498db",
+                        yAxisID: "y",
+                        tension: 0.2, fill: true
+                    },
+                    {
+                        label: "Timeout Rate (%)",
+                        data: points.map(p => p.timeout_percent),
+                        borderColor: "#e74c3c",
+                        yAxisID: "y1",
+                        tension: 0.2, fill: false, borderDash: [5, 5],
+                        hidden: intervalName === "Raw (Sec)"
+                    }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                onClick: (e, elements) => {
+                    if (elements.length > 0) {
+                        const index = elements[0].index;
+                        const point = points[index];
+                        if (point.start_ts && point.end_ts) {
+                            // Only zoom if we are not already at the finest level (Raw (Sec))
+                            if (intervalName !== "Raw (Sec)") {
+                                window.location.href = `/?start=${point.start_ts}&end=${point.end_ts}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: { type: "linear", display: true, position: "left", beginAtZero: true },
+                    y1: { type: "linear", display: intervalName !== "Raw (Sec)", position: "right", beginAtZero: true, max: 100 }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
