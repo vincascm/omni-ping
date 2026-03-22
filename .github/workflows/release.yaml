@@ -42,7 +42,7 @@ jobs:
     runs-on: ${{ matrix.platform.runs-on }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Build binary
         uses: houseabsolute/actions-rust-cross@v1
         with:
@@ -53,7 +53,7 @@ jobs:
       - name: Publish artifacts and release
         uses: houseabsolute/actions-rust-release@v0
         with:
-          executable-name: client server
+          executable-name: server
           target: ${{ matrix.platform.target }}
-          extra-files: ''
+          extra-files: 'client'
           changes-file: ''
