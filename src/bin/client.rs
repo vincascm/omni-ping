@@ -12,7 +12,7 @@ use axum::{
     Router,
     extract::{Query, State},
     response::{Html, Json},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Datelike, Local};
 use serde::{Deserialize, Serialize};
@@ -28,10 +28,6 @@ use tokio::{
 #[command(name = "omni-ping-client")]
 #[command(about = "UDP Ping-Pong Client")]
 struct Cli {
-    /// Server address to ping
-    #[arg(short, long)]
-    server: String,
-    /// Timeout for each ping in seconds
     #[arg(short, long, default_value = "2")]
     timeout: u64,
     /// Interval between pings in milliseconds
@@ -102,10 +98,11 @@ struct Stats {
     start_time: Instant,
     max_entries: usize,
     total_sent: usize,
+    target_addr: Option<SocketAddr>,
 }
 
 impl Stats {
-    fn new(target: &str, max_entries: usize) -> Self {
+    fn new(target: &str, target_addr: Option<SocketAddr>, max_entries: usize) -> Self {
         Self {
             target: target.to_string(),
             server_geo: None,
@@ -114,6 +111,7 @@ impl Stats {
             start_time: Instant::now(),
             max_entries,
             total_sent: 0,
+            target_addr,
         }
     }
 
@@ -351,41 +349,112 @@ async fn get_stats_api(
     Json(state.read().await.to_final_stats(query))
 }
 
+#[derive(Deserialize)]
+struct SetTargetRequest {
+    target: String,
+}
+
+async fn set_target_api(
+    State(state): State<Arc<RwLock<Stats>>>,
+    Json(payload): Json<SetTargetRequest>,
+) -> Result<Json<String>, (axum::http::StatusCode, String)> {
+    let target = payload.target;
+    if target.trim().is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Target cannot be empty".to_string(),
+        ));
+    }
+    let target_addr = lookup_host(&target)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("DNS lookup failed: {e}"),
+            )
+        })?
+        .next()
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Could not resolve: {target}"),
+            )
+        })?;
+
+    {
+        let mut stats = state.write().await;
+        stats.target = target.clone();
+        stats.target_addr = Some(target_addr);
+        stats.server_geo = None;
+        stats.total_sent = 0;
+        stats.entries.clear();
+        stats.start_time = Instant::now();
+    }
+
+    let s = state.clone();
+    tokio::spawn(async move {
+        match fetch_geo(target_addr.ip()).await {
+            Ok(geo) => s.write().await.server_geo = Some(geo),
+            Err(e) => eprintln!("fetch_geo error: {e}"),
+        }
+    });
+
+    Ok(Json("Target updated".to_string()))
+}
+
 impl Cli {
     async fn run(&self) -> Result<()> {
-        let server_addr = lookup_host(&self.server)
-            .await?
-            .next()
-            .ok_or_else(|| anyhow!("Could not resolve: {}", self.server))?;
-        let stats = Arc::new(RwLock::new(Stats::new(&self.server, self.max_entries)));
-        let stats_for_geo = stats.clone();
-        tokio::spawn(async move {
-            match fetch_geo(server_addr.ip()).await {
-                Ok(geo) => stats_for_geo.write().await.server_geo = Some(geo),
-                Err(e) => eprintln!("fetch_geo error: {e}"),
-            }
-        });
+        let target = "No target".to_string();
+        let target_addr: Option<SocketAddr> = None;
+
+        let stats = Arc::new(RwLock::new(Stats::new(
+            &target,
+            target_addr,
+            self.max_entries,
+        )));
+
+        if let Some(addr) = target_addr {
+            let stats_for_geo = stats.clone();
+            tokio::spawn(async move {
+                match fetch_geo(addr.ip()).await {
+                    Ok(geo) => stats_for_geo.write().await.server_geo = Some(geo),
+                    Err(e) => eprintln!("fetch_geo error: {e}"),
+                }
+            });
+        }
+
         let mut ticker = interval(Duration::from_millis(self.interval));
         let app = Router::new()
             .route("/", get(show_index))
             .route("/api/stats", get(get_stats_api))
+            .route("/api/target", post(set_target_api))
             .with_state(stats.clone());
+
         let listener = TcpListener::bind(&self.listen).await?;
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         println!("Real-time report available at http://{}", self.listen);
+
         tokio::select! {
-            _ = signal::ctrl_c() => println!("\nExited."),
+            _ = signal::ctrl_c() => println!("
+        Exited."),
             _ = axum::serve(listener, app) => {},
             _ = async {
                 loop {
                     ticker.tick().await;
+
+                    let (current_target_addr, client_geo_none) = {
+                        let s = stats.read().await;
+                        (s.target_addr, s.client_geo.is_none())
+                    };
+
+                    let Some(server_addr) = current_target_addr else {
+                        continue;
+                    };
+
                     let timestamp = Local::now();
                     let sent_at = Instant::now();
-                    let command = if stats.clone().read().await.client_geo.is_none() {
-                        1
-                    } else {
-                        0
-                    };
+                    let command = if client_geo_none { 1 } else { 0 };
+
                     if let Err(e) = socket.send_to(&[command], server_addr).await {
                         eprintln!("send to error: {e}");
                     }
@@ -405,10 +474,8 @@ impl Cli {
                                                         Err(e) => eprintln!("fetch_geo: {e}"),
                                                     }
                                                 });
-
                                             },
                                             Err(e) => eprintln!("{e}"),
-
                                         };
                                     }
                                     stats.write().await.record(timestamp, Some(sent_at.elapsed()));

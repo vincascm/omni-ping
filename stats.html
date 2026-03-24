@@ -20,6 +20,13 @@
 </head>
 <body x-data="pingStats()" x-init="init()">
     <div class="container" x-cloak>
+        <div class="summary" style="margin-bottom: 2em; padding: 1.5em; background: #ebf5fb; border-radius: 8px;">
+            <div style="flex: 1; display: flex; gap: 10px; align-items: center;">
+                <strong>Server Target:</strong>
+                <input type="text" x-model="newTarget" placeholder="e.g. 1.2.3.4:8888 or example.com:8888" style="flex: 1; padding: 8px; border: 1px solid #bdc3c7; border-radius: 4px;">
+                <button @click="setTarget" style="background: #27ae60; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Set Target</button>
+            </div>
+        </div>
         <h1 style="display: flex; align-items: center; justify-content: space-between;">
             <div>
                 Ping Statistics for <span x-text="hideSensitive ? mask(stats.target) : stats.target"></span>
@@ -77,6 +84,7 @@
         function pingStats() {
             return {
                 hideSensitive: false,
+                newTarget: "",
                 mask(text) {
                     return text ? text.replace(/./g, '*') : '';
                 },
@@ -103,6 +111,25 @@
                             this.fetchData();
                         }
                     }, 5000);
+                },
+                async setTarget() {
+                    if (!this.newTarget.trim()) return;
+                    try {
+                        const response = await fetch("/api/target", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ target: this.newTarget })
+                        });
+                        if (response.ok) {
+                            window.location.href = "/";
+                        } else {
+                            const errorText = await response.text();
+                            alert("Error updating target: " + errorText);
+                        }
+                    } catch (error) {
+                        console.error("Error setting target:", error);
+                        alert("Error setting target: " + error);
+                    }
                 },
                 async fetchData() {
                     const urlParams = new URLSearchParams(window.location.search);
