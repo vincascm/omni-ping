@@ -2,7 +2,7 @@ use clap::Parser;
 use std::{
     cmp::min,
     collections::{BTreeMap, VecDeque},
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::Instant,
 };
@@ -151,15 +151,15 @@ impl Stats {
             .entries
             .iter()
             .filter(|(ts, _)| {
-                if let Some(s) = query.start {
-                    if ts.timestamp() < s {
-                        return false;
-                    }
+                if let Some(s) = query.start
+                    && ts.timestamp() < s
+                {
+                    return false;
                 }
-                if let Some(e) = query.end {
-                    if ts.timestamp() > e {
-                        return false;
-                    }
+                if let Some(e) = query.end
+                    && ts.timestamp() > e
+                {
+                    return false;
                 }
                 true
             })
@@ -320,6 +320,26 @@ async fn fetch_geo(ip_or_host: IpAddr) -> Result<GeoInfo> {
     Ok(reqwest::get(&url).await?.json().await?)
 }
 
+fn parse_socket_addr(data: &[u8]) -> Result<SocketAddr> {
+    match data[0] {
+        0 if data.len() == 7 => {
+            let octets: [u8; 4] = data[1..5].try_into()?;
+            let ip = Ipv4Addr::from_octets(octets);
+            let octets: [u8; 2] = data[5..7].try_into()?;
+            let port = u16::from_be_bytes(octets);
+            Ok(SocketAddr::new(IpAddr::V4(ip), port))
+        }
+        1 if data.len() == 19 => {
+            let octets: [u8; 16] = data[1..17].try_into()?;
+            let ip = Ipv6Addr::from_octets(octets);
+            let octets: [u8; 2] = data[17..19].try_into()?;
+            let port = u16::from_be_bytes(octets);
+            Ok(SocketAddr::new(IpAddr::V6(ip), port))
+        }
+        _ => Err(anyhow!("invalid socket addr bytes")),
+    }
+}
+
 async fn show_index() -> Html<&'static str> {
     Html(include_str!("../../stats.html"))
 }
@@ -369,24 +389,27 @@ impl Cli {
                     if let Err(e) = socket.send_to(&[command], server_addr).await {
                         eprintln!("send to error: {e}");
                     }
-                    let mut buf = [0u8; 8];
+                    let mut buf = [0u8; 32];
                     tokio::select! {
                         recv_res = socket.recv_from(&mut buf) => {
                             match recv_res {
                                 Ok((len, addr)) if addr == server_addr => {
-                                    if buf[0] == 1 && len == 5 {
-                                        let ip_octets = match buf[1..5].try_into() {
-                                            Ok(v) => v,
-                                            Err(_) => continue,
+                                    if buf[0] == 1 {
+                                        match parse_socket_addr(&buf[1..len]) {
+                                            Ok(addr) => {
+                                                let ip = addr.ip();
+                                                let s = stats.clone();
+                                                tokio::spawn(async move {
+                                                    match fetch_geo(ip).await {
+                                                        Ok(geo) => s.write().await.client_geo = Some(geo),
+                                                        Err(e) => eprintln!("fetch_geo: {e}"),
+                                                    }
+                                                });
+
+                                            },
+                                            Err(e) => eprintln!("{e}"),
+
                                         };
-                                        let client_ip: IpAddr = Ipv4Addr::from_octets(ip_octets).into();
-                                        let s = stats.clone();
-                                        tokio::spawn(async move {
-                                            match fetch_geo(client_ip).await {
-                                                Ok(geo) => s.write().await.client_geo = Some(geo),
-                                                Err(e) => eprintln!("fetch_geo: {e}"),
-                                            }
-                                        });
                                     }
                                     stats.write().await.record(timestamp, Some(sent_at.elapsed()));
                                 }
