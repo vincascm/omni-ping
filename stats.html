@@ -2,12 +2,8 @@
 <html>
 <head>
     <title>omni-ping Real-time Statistics</title>
-    {% if is_zoomed %}
-    <!-- Auto-refresh disabled when zoomed -->
-    {% else %}
-    <meta http-equiv="refresh" content="5">
-    {% endif %}
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <style>
         body { font-family: sans-serif; margin: 2em; background: #f4f4f9; color: #333; }
         .container { max-width: 1100px; margin: 0 auto; background: white; padding: 2em; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -19,103 +15,163 @@
         .chart-container { cursor: pointer; position: relative; height: 500px; margin-bottom: 1em; }
         .as-info { font-size: 0.82em; color: #666; display: block; margin-top: 6px; line-height: 1.2; }
         .ip-info { color: #2980b9; font-weight: bold; font-family: monospace; }
+        [x-cloak] { display: none !important; }
     </style>
 </head>
-<body>
-    <div class=container>
-        <h1>Ping Statistics for {{ target }}
-            {% if is_zoomed %}
-            <a href="/" style="font-size: 0.5em; vertical-align: middle; margin-left: 20px; text-decoration: none; background: #3498db; color: white; padding: 5px 10px; border-radius: 4px;">Reset Zoom</a>
-            {% endif %}
+<body x-data="pingStats()" x-init="init()">
+    <div class="container" x-cloak>
+        <h1 style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+                Ping Statistics for <span x-text="hideSensitive ? mask(stats.target) : stats.target"></span>
+                <template x-if="stats.is_zoomed">
+                    <a href="/" style="font-size: 0.5em; vertical-align: middle; margin-left: 20px; text-decoration: none; background: #3498db; color: white; padding: 5px 10px; border-radius: 4px;">Reset Zoom</a>
+                </template>
+            </div>
+            <button @click="hideSensitive = !hideSensitive" style="font-size: 0.5em; background: #95a5a6; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer;" x-text="hideSensitive ? 'Show IPs' : 'Hide IPs'"></button>
         </h1>
 
-        <div class=summary>
-            {% if client_geo and client_geo.status == "success" %}
-            <div class="stat-card geo-card">
-                <strong>Local</strong><br>
-                <span class="ip-info">{{ client_geo.query }}</span><br>
-                {{ client_geo.city }}, {{ client_geo.country }}
-                <span class="as-info">{{ client_geo.as }}</span>
-            </div>
-            {% endif %}
+        <div class="summary">
+            <template x-if="stats.client_geo && stats.client_geo.status == 'success'">
+                <div class="stat-card geo-card">
+                    <strong>Local</strong><br>
+                    <span class="ip-info" x-text="hideSensitive ? mask(stats.client_geo.query) : stats.client_geo.query"></span><br>
+                    <span x-text="stats.client_geo.city"></span>, <span x-text="stats.client_geo.country"></span>
+                    <span class="as-info" x-text="stats.client_geo.as"></span>
+                </div>
+            </template>
 
-            {% if server_geo and server_geo.status == "success" %}
-            <div class="stat-card geo-card">
-                <strong>Remote</strong><br>
-                <span class="ip-info">{{ server_geo.query }}</span><br>
-                {{ server_geo.city }}, {{ server_geo.country }}
-                <span class="as-info">{{ server_geo.as }}</span>
-            </div>
-            {% endif %}
+            <template x-if="stats.server_geo && stats.server_geo.status == 'success'">
+                <div class="stat-card geo-card">
+                    <strong>Remote</strong><br>
+                    <span class="ip-info" x-text="hideSensitive ? mask(stats.server_geo.query) : stats.server_geo.query"></span><br>
+                    <span x-text="stats.server_geo.city"></span>, <span x-text="stats.server_geo.country"></span>
+                    <span class="as-info" x-text="stats.server_geo.as"></span>
+                </div>
+            </template>
 
-            {% if distance_km is not none %}
-            <div class="stat-card dist-card">
-                <strong>Physical Limits</strong><br>
-                {{ distance_km | round(2) }} km<br>{{ fiber_limit_ms | round(3) }} ms (Fiber)
-            </div>
-            {% endif %}
+            <template x-if="stats.distance_km !== null">
+                <div class="stat-card dist-card">
+                    <strong>Physical Limits</strong><br>
+                    <span x-text="stats.distance_km.toFixed(2)"></span> km<br>
+                    <span x-text="stats.fiber_limit_ms.toFixed(3)"></span> ms (Fiber)
+                </div>
+            </template>
         </div>
 
         <div class="summary">
-            <div class="stat-card"><strong>Transmitted</strong><br>{{ total_transmitted }}</div>
-            <div class="stat-card"><strong>Avg Packet Loss</strong><br>{{ packet_loss_percent | round(2) }}%</div>
-            <div class="stat-card"><strong>Min RTT</strong><br>{{ min_latency }}</div>
+            <div class="stat-card"><strong>Transmitted</strong><br><span x-text="stats.total_transmitted"></span></div>
+            <div class="stat-card"><strong>Avg Packet Loss</strong><br><span x-text="stats.packet_loss_percent.toFixed(2)"></span>%</div>
+            <div class="stat-card"><strong>Min RTT</strong><br><span x-text="stats.min_latency"></span></div>
         </div>
 
         <div class="summary">
-            <div class="stat-card"><strong>Avg RTT</strong><br>{{ avg_latency }}</div>
-            <div class="stat-card"><strong>Max RTT</strong><br>{{ max_latency }}</div>
-            <div class="stat-card"><strong>Std Dev</strong><br>{{ std_dev }}</div>
+            <div class="stat-card"><strong>Avg RTT</strong><br><span x-text="stats.avg_latency"></span></div>
+            <div class="stat-card"><strong>Max RTT</strong><br><span x-text="stats.max_latency"></span></div>
+            <div class="stat-card"><strong>Std Dev</strong><br><span x-text="stats.std_dev"></span></div>
         </div>
 
         <div class="chart-container"><canvas id="pingChart"></canvas></div>
     </div>
     <script>
-        const points = {{ points | tojson }};
-        const intervalName = "{{ interval_name }}";
-        const ctx = document.getElementById("pingChart").getContext("2d");
-        new Chart(ctx, {
-            type: "line",
-            data: {
-                labels: points.map(p => p.label),
-                datasets: [
-                    {
-                        label: "Avg Latency (ms)",
-                        data: points.map(p => p.avg_latency),
-                        borderColor: "#3498db",
-                        yAxisID: "y",
-                        tension: 0.2, fill: true
-                    },
-                    {
-                        label: "Timeout Rate (%)",
-                        data: points.map(p => p.timeout_percent),
-                        borderColor: "#e74c3c",
-                        yAxisID: "y1",
-                        tension: 0.2, fill: false, borderDash: [5, 5],
-                        hidden: intervalName === "Raw (Sec)"
-                    }
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false, animation: false,
-                onClick: (e, elements) => {
-                    if (elements.length > 0) {
-                        const index = elements[0].index;
-                        const point = points[index];
-                        if (point.start_ts && point.end_ts) {
-                            // Only zoom if we are not already at the finest level (Raw (Sec))
-                            if (intervalName !== "Raw (Sec)") {
-                                window.location.href = `/?start=${point.start_ts}&end=${point.end_ts}`;
-                            }
+        let pingChartInstance = null;
+        function pingStats() {
+            return {
+                hideSensitive: false,
+                mask(text) {
+                    return text ? text.replace(/./g, '*') : '';
+                },
+                stats: {
+                    target: '',
+                    is_zoomed: false,
+                    client_geo: null,
+                    server_geo: null,
+                    distance_km: null,
+                    fiber_limit_ms: null,
+                    total_transmitted: 0,
+                    packet_loss_percent: 0,
+                    min_latency: '0ms',
+                    avg_latency: '0ms',
+                    max_latency: '0ms',
+                    std_dev: '0ms',
+                    points: [],
+                    interval_name: ''
+                },
+                init() {
+                    this.fetchData();
+                    setInterval(() => {
+                        if (!this.stats.is_zoomed) {
+                            this.fetchData();
                         }
+                    }, 5000);
+                },
+                async fetchData() {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const url = '/api/stats?' + urlParams.toString();
+                    try {
+                        const response = await fetch(url);
+                        const rawData = await response.json();
+                        this.stats = rawData;
+                        this.updatePingChart(rawData);
+                    } catch (error) {
+                        console.error('Error fetching stats:', error);
                     }
                 },
-                scales: {
-                    y: { type: "linear", display: true, position: "left", beginAtZero: true },
-                    y1: { type: "linear", display: intervalName !== "Raw (Sec)", position: "right", beginAtZero: true, max: 100 }
+                updatePingChart(rawData) {
+                    const ctx = document.getElementById('pingChart').getContext('2d');
+                    const data = {
+                        labels: rawData.points.map(p => p.label),
+                        datasets: [
+                            {
+                                label: 'Avg Latency (ms)',
+                                data: rawData.points.map(p => p.avg_latency),
+                                borderColor: '#3498db',
+                                yAxisID: 'y',
+                                tension: 0.2, fill: true
+                            },
+                            {
+                                label: 'Timeout Rate (%)',
+                                data: rawData.points.map(p => p.timeout_percent),
+                                borderColor: '#e74c3c',
+                                yAxisID: 'y1',
+                                tension: 0.2, fill: false, borderDash: [5, 5],
+                                hidden: rawData.interval_name === 'Raw (Sec)'
+                            }
+                        ]
+                    };
+                    if (pingChartInstance) {
+                        pingChartInstance.data = data;
+                        if (pingChartInstance.options.scales && pingChartInstance.options.scales.y1) {
+                            pingChartInstance.options.scales.y1.display = rawData.interval_name !== 'Raw (Sec)';
+                        }
+                        pingChartInstance.update();
+                    } else {
+                        if (rawData.points.length === 0) return;
+                        pingChartInstance = new Chart(ctx, {
+                            type: 'line',
+                            data: data,
+                            options: {
+                                responsive: true, maintainAspectRatio: false, animation: false,
+                                onClick: (e, elements) => {
+                                    if (elements.length > 0) {
+                                        const index = elements[0].index;
+                                        const point = this.stats.points[index];
+                                        if (point && point.start_ts && point.end_ts) {
+                                            if (this.stats.interval_name !== 'Raw (Sec)') {
+                                                window.location.href = '/?start=' + point.start_ts + '&end=' + point.end_ts;
+                                            }
+                                        }
+                                    }
+                                },
+                                scales: {
+                                    y: { type: 'linear', display: true, position: 'left', beginAtZero: true },
+                                    y1: { type: 'linear', display: rawData.interval_name !== 'Raw (Sec)', position: 'right', beginAtZero: true, max: 100 }
+                                }
+                            }
+                        });
+                    }
                 }
-            }
-        });
+            };
+        }
     </script>
 </body>
 </html>

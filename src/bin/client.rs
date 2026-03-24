@@ -11,11 +11,10 @@ use anyhow::{Result, anyhow};
 use axum::{
     Router,
     extract::{Query, State},
-    response::Html,
+    response::{Html, Json},
     routing::get,
 };
 use chrono::{DateTime, Datelike, Local};
-use minijinja::render;
 use serde::{Deserialize, Serialize};
 
 use tokio::{
@@ -24,6 +23,27 @@ use tokio::{
     sync::RwLock,
     time::{Duration, interval, sleep},
 };
+
+#[derive(Parser)]
+#[command(name = "omni-ping-client")]
+#[command(about = "UDP Ping-Pong Client")]
+struct Cli {
+    /// Server address to ping
+    #[arg(short, long)]
+    server: String,
+    /// Timeout for each ping in seconds
+    #[arg(short, long, default_value = "2")]
+    timeout: u64,
+    /// Interval between pings in milliseconds
+    #[arg(short, long, default_value = "1000")]
+    interval: u64,
+    /// Maximum entries to keep in memory (default 1M ~ 100MB)
+    #[arg(short, long, default_value = "1000000")]
+    max_entries: usize,
+    /// Address to bind for stats server
+    #[arg(short, long, default_value = "127.0.0.1:3000")]
+    listen: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct GeoInfo {
@@ -300,130 +320,89 @@ async fn fetch_geo(ip_or_host: IpAddr) -> Result<GeoInfo> {
     Ok(reqwest::get(&url).await?.json().await?)
 }
 
-async fn show_stats(
+async fn show_index() -> Html<&'static str> {
+    Html(include_str!("../../stats.html"))
+}
+
+async fn get_stats_api(
     State(state): State<Arc<RwLock<Stats>>>,
     Query(query): Query<ZoomParams>,
-) -> Html<String> {
-    let s = state.read().await.to_final_stats(query);
-    let rendered = render!(include_str!("../../stats.html"),
-        target => s.target,
-        server_geo => s.server_geo,
-        client_geo => s.client_geo,
-        distance_km => s.distance_km,
-        fiber_limit_ms => s.fiber_limit_ms,
-        end_time_str => s.end_time_str,
-        total_transmitted => s.total_transmitted,
-        total_received => s.total_received,
-        packet_loss_percent => s.packet_loss_percent,
-        min_latency => s.min_latency,
-        avg_latency => s.avg_latency,
-        max_latency => s.max_latency,
-        std_dev => s.std_dev,
-        total_duration => s.total_duration,
-        points => s.points,
-        interval_name => s.interval_name,
-        is_zoomed => s.is_zoomed
-    );
-    Html(rendered)
+) -> Json<FinalStats> {
+    Json(state.read().await.to_final_stats(query))
 }
 
-pub async fn run(
-    listen_addr: &str,
-    server: &str,
-    timeout_secs: u64,
-    interval_ms: u64,
-    max_entries: usize,
-) -> Result<()> {
-    let server_addr = lookup_host(&server)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow!("Could not resolve: {server}"))?;
-    let stats = Arc::new(RwLock::new(Stats::new(server, max_entries)));
-    let stats_for_geo = stats.clone();
-    tokio::spawn(async move {
-        match fetch_geo(server_addr.ip()).await {
-            Ok(geo) => stats_for_geo.write().await.server_geo = Some(geo),
-            Err(e) => eprintln!("fetch_geo error: {e}"),
-        }
-    });
-    let mut ticker = interval(Duration::from_millis(interval_ms));
-    let app = Router::new()
-        .route("/", get(show_stats))
-        .with_state(stats.clone());
-    let listener = TcpListener::bind(listen_addr).await?;
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    println!("Real-time report available at http://{}", listen_addr);
-    tokio::select! {
-        _ = signal::ctrl_c() => println!("\nExited."),
-        _ = axum::serve(listener, app) => {},
-        _ = async {
-            loop {
-                ticker.tick().await;
-                let timestamp = Local::now();
-                let sent_at = Instant::now();
-                let command = if stats.clone().read().await.client_geo.is_none() {
-                    1
-                } else {
-                    0
-                };
-                if let Err(e) = socket.send_to(&[command], server_addr).await {
-                    eprintln!("send to error: {e}");
-                }
-                let mut buf = [0u8; 8];
-                tokio::select! {
-                    recv_res = socket.recv_from(&mut buf) => {
-                        match recv_res {
-                            Ok((len, addr)) if addr == server_addr => {
-                                if buf[0] == 1 && len == 5 {
-                                    let ip_octets = match buf[1..5].try_into() {
-                                        Ok(v) => v,
-                                        Err(_) => continue,
-                                    };
-                                    let client_ip: IpAddr = Ipv4Addr::from_octets(ip_octets).into();
-                                    let s = stats.clone();
-                                    tokio::spawn(async move {
-                                        match fetch_geo(client_ip).await {
-                                            Ok(geo) => s.write().await.client_geo = Some(geo),
-                                            Err(e) => eprintln!("fetch_geo: {e}"),
-                                        }
-                                    });
-                                }
-                                stats.write().await.record(timestamp, Some(sent_at.elapsed()));
-                            }
-                            _ => stats.write().await.record(timestamp, None),
-                        }
-                    }
-                    _ = sleep(Duration::from_secs(timeout_secs)) => stats.write().await.record(timestamp, None),
-                }
+impl Cli {
+    async fn run(&self) -> Result<()> {
+        let server_addr = lookup_host(&self.server)
+            .await?
+            .next()
+            .ok_or_else(|| anyhow!("Could not resolve: {}", self.server))?;
+        let stats = Arc::new(RwLock::new(Stats::new(&self.server, self.max_entries)));
+        let stats_for_geo = stats.clone();
+        tokio::spawn(async move {
+            match fetch_geo(server_addr.ip()).await {
+                Ok(geo) => stats_for_geo.write().await.server_geo = Some(geo),
+                Err(e) => eprintln!("fetch_geo error: {e}"),
             }
-        } => {}
+        });
+        let mut ticker = interval(Duration::from_millis(self.interval));
+        let app = Router::new()
+            .route("/", get(show_index))
+            .route("/api/stats", get(get_stats_api))
+            .with_state(stats.clone());
+        let listener = TcpListener::bind(&self.listen).await?;
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        println!("Real-time report available at http://{}", self.listen);
+        tokio::select! {
+            _ = signal::ctrl_c() => println!("\nExited."),
+            _ = axum::serve(listener, app) => {},
+            _ = async {
+                loop {
+                    ticker.tick().await;
+                    let timestamp = Local::now();
+                    let sent_at = Instant::now();
+                    let command = if stats.clone().read().await.client_geo.is_none() {
+                        1
+                    } else {
+                        0
+                    };
+                    if let Err(e) = socket.send_to(&[command], server_addr).await {
+                        eprintln!("send to error: {e}");
+                    }
+                    let mut buf = [0u8; 8];
+                    tokio::select! {
+                        recv_res = socket.recv_from(&mut buf) => {
+                            match recv_res {
+                                Ok((len, addr)) if addr == server_addr => {
+                                    if buf[0] == 1 && len == 5 {
+                                        let ip_octets = match buf[1..5].try_into() {
+                                            Ok(v) => v,
+                                            Err(_) => continue,
+                                        };
+                                        let client_ip: IpAddr = Ipv4Addr::from_octets(ip_octets).into();
+                                        let s = stats.clone();
+                                        tokio::spawn(async move {
+                                            match fetch_geo(client_ip).await {
+                                                Ok(geo) => s.write().await.client_geo = Some(geo),
+                                                Err(e) => eprintln!("fetch_geo: {e}"),
+                                            }
+                                        });
+                                    }
+                                    stats.write().await.record(timestamp, Some(sent_at.elapsed()));
+                                }
+                                _ => stats.write().await.record(timestamp, None),
+                            }
+                        }
+                        _ = sleep(Duration::from_secs(self.timeout)) => stats.write().await.record(timestamp, None),
+                    }
+                }
+            } => {}
+        }
+        Ok(())
     }
-    Ok(())
-}
-
-#[derive(Parser)]
-#[command(name = "omni-ping-client")]
-#[command(about = "UDP Ping-Pong Client")]
-struct Cli {
-    /// Server address to ping
-    #[arg(short, long)]
-    server: String,
-    /// Timeout for each ping in seconds
-    #[arg(short, long, default_value = "2")]
-    timeout: u64,
-    /// Interval between pings in milliseconds
-    #[arg(short, long, default_value = "1000")]
-    interval: u64,
-    /// Maximum entries to keep in memory (default 1M ~ 100MB)
-    #[arg(short, long, default_value = "1000000")]
-    max_entries: usize,
-    /// Address to bind for stats server
-    #[arg(short, long, default_value = "127.0.0.1:3000")]
-    listen: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    run(&cli.listen, &cli.server, cli.timeout, cli.interval, cli.max_entries).await
+    Cli::parse().run().await
 }
